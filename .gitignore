@@ -1,0 +1,14 @@
+# OS
+.DS_Store
+
+# Build
+dist/
+build/
+out/
+
+# Dependencies
+node_modules/
+
+# Rust
+target/
+Cargo.lock
