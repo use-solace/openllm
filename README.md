@@ -25,7 +25,7 @@ openllm-server
 with custom port:
 
 ```bash
-openllm-server 9242
+openllm-server --port 9242
 ```
 
 ## Model Registry
