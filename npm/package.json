@@ -1,0 +1,53 @@
+{
+  "name": "@use-solace/openllm",
+  "version": "1.0.0",
+  "description": "OpenLLM model registry and API client with full TypeScript support",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./elysia": "./dist/elysia.js",
+    "./types": "./dist/types.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "openllm",
+    "ollama",
+    "llama.cpp",
+    "huggingface",
+    "inference",
+    "model-registry",
+    "elysia"
+  ],
+  "author": "Solace Contributors",
+  "license": "MIT",
+  "peerDependencies": {
+    "elysia": "^1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "elysia": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "@elysiajs/bearer": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "elysia": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
