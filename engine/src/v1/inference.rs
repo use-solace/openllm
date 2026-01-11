@@ -75,27 +75,36 @@ pub async fn inference_complete(
     Json(req): Json<InferenceRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let models = state.models.lock().await;
-    
-    let _model = models
+
+    let model = models
         .iter()
-        .find(|m| m.info.id == req.model_id)
+        .find(|m| m.registry_entry.id == req.model_id)
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
-                format!("Model '{}' not found. Please load it first.", req.model_id),
+                format!("Model '{}' not found or not loaded. Please register and load it first.", req.model_id),
             )
         })?;
-    
+
+    if !model.registry_entry.loaded {
+        return Err((
+            StatusCode::PRECONDITION_FAILED,
+            format!("Model '{}' is not loaded. Load it first.", req.model_id),
+        ));
+    }
+
+    drop(models);
+
     let tokens = simulate_token_generation(&req.prompt, req.max_tokens);
     let text: String = tokens.join("");
-    
+
     let response = InferenceResponse {
         model_id: req.model_id,
         text,
         tokens_generated: tokens.len() as u32,
         finish_reason: "stop".to_string(),
     };
-    
+
     Ok((StatusCode::OK, Json(response)))
 }
 
@@ -104,17 +113,24 @@ pub async fn inference_stream(
     Json(req): Json<InferenceRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let models = state.models.lock().await;
-    
-    let _model = models
+
+    let model = models
         .iter()
-        .find(|m| m.info.id == req.model_id)
+        .find(|m| m.registry_entry.id == req.model_id)
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
-                format!("Model '{}' not found. Please load it first.", req.model_id),
+                format!("Model '{}' not found or not loaded. Please register and load it first.", req.model_id),
             )
         })?;
-    
+
+    if !model.registry_entry.loaded {
+        return Err((
+            StatusCode::PRECONDITION_FAILED,
+            format!("Model '{}' is not loaded. Load it first.", req.model_id),
+        ));
+    }
+
     drop(models);
     
     let tokens = simulate_token_generation(&req.prompt, req.max_tokens);
