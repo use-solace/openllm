@@ -39,8 +39,6 @@ export const models = ModelRegistry({
       latency: "fast",
     },
   },
-  db: "postgres://postgres@localhost:5432/test",
-  driver: "postgres",
 });
 
 // Usage examples

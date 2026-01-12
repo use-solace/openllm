@@ -92,11 +92,6 @@ export const models = ModelRegistry(
       capabilities: ["chat", "completion"],
       latency: "fast",
     },
-  },
-  // Optional database settings
-  {
-    db: "postgres://postgres@localhost:5432/test",
-    driver: "postgres",  // postgres, mongodb (more coming soon)
   }
 );
 
@@ -111,7 +106,6 @@ models.find({ capability: "chat", latency: "fast" });
 * `inference` refers to which backend the model uses (`llama` or `ollama`).
 * `capabilities` defines supported tasks.
 * `latency` is a routing hint.
-* Optional database config allows persistent storage of the registry.
 
 
 
@@ -125,7 +119,7 @@ import { models } from "./registry.ts";
 
 const api = openllm.start({
     modelrouter: true, // enable model router
-    registry: models,  // or a database connection string
+    registry: models,  // model registry
     engine: 4292       // openllm-server port
 });
 
@@ -142,7 +136,7 @@ import { models } from "./registry.ts";
 const app = new Elysia().use(openllm({
     prefix: "ollm",     // routes will be under /ollm/* instead of /openllm/*
     modelrouter: true,  // enable model router
-    registry: models,   // or database connection string
+    registry: models,   // model registry
     engine: 4292        // openllm-server port
 }));
 
@@ -313,7 +307,6 @@ OpenLLM consists of three main components:
 
 ### 2. Model Registry (TypeScript)
 - In-memory model catalog with filtering
-- Optional database persistence (PostgreSQL, MongoDB)
 - Model routing based on capabilities and latency
 - Full TypeScript type safety
 

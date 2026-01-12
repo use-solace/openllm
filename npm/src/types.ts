@@ -26,12 +26,7 @@ export interface RegistryEntryInput {
   latency?: LatencyProfile;
 }
 
-export interface DatabaseConfig {
-  db?: string;
-  driver?: "postgres" | "mongodb";
-}
-
-export interface ModelRegistryConfig extends DatabaseConfig {
+export interface ModelRegistryConfig {
   entries: Record<string, RegistryEntryInput>;
 }
 

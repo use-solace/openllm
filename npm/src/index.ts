@@ -4,7 +4,6 @@ export type {
   LatencyProfile,
   ModelRegistryEntry,
   RegistryEntryInput,
-  DatabaseConfig,
   ModelRegistryConfig,
   HealthResponse,
   ModelListResponse,

@@ -1,5 +1,4 @@
 import type {
-  DatabaseConfig,
   FindModelOptions,
   ModelRegistryConfig,
   ModelRegistryEntry,
@@ -8,17 +7,11 @@ import type {
 
 export class ModelRegistryImpl {
   private entries: Map<string, ModelRegistryEntry> = new Map();
-  private dbConfig?: DatabaseConfig;
 
-  constructor(config: ModelRegistryConfig | string) {
-    if (typeof config === "string") {
-      this.dbConfig = { db: config, driver: "postgres" };
-    } else {
-      this.dbConfig = config;
-      const entries = config.entries ?? {};
-      for (const [id, entry] of Object.entries(entries)) {
-        this.registerEntry(id, entry);
-      }
+  constructor(config: ModelRegistryConfig) {
+    const entries = config.entries ?? {};
+    for (const [id, entry] of Object.entries(entries)) {
+      this.registerEntry(id, entry);
     }
   }
 
@@ -121,56 +114,10 @@ export class ModelRegistryImpl {
       this.entries.set(id, entry);
     }
   }
-
-  async loadFromDatabase(): Promise<void> {
-    if (!this.dbConfig?.db) {
-      return;
-    }
-
-    switch (this.dbConfig.driver) {
-      case "postgres":
-        await this.loadFromPostgres();
-        break;
-      case "mongodb":
-        await this.loadFromMongoDB();
-        break;
-    }
-  }
-
-  async saveToDatabase(): Promise<void> {
-    if (!this.dbConfig?.db) {
-      return;
-    }
-
-    switch (this.dbConfig.driver) {
-      case "postgres":
-        await this.saveToPostgres();
-        break;
-      case "mongodb":
-        await this.saveToMongoDB();
-        break;
-    }
-  }
-
-  private async loadFromPostgres(): Promise<void> {
-    throw new Error("PostgreSQL driver not yet implemented. Please install pg: npm install pg");
-  }
-
-  private async saveToPostgres(): Promise<void> {
-    throw new Error("PostgreSQL driver not yet implemented. Please install pg: npm install pg");
-  }
-
-  private async loadFromMongoDB(): Promise<void> {
-    throw new Error("MongoDB driver not yet implemented. Please install mongodb: npm install mongodb");
-  }
-
-  private async saveToMongoDB(): Promise<void> {
-    throw new Error("MongoDB driver not yet implemented. Please install mongodb: npm install mongodb");
-  }
 }
 
 export function ModelRegistry(
-  config: ModelRegistryConfig | string,
+  config: ModelRegistryConfig,
 ): ModelRegistryImpl {
   return new ModelRegistryImpl(config);
 }
