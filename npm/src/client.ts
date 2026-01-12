@@ -21,7 +21,13 @@ export class OpenLLMClient {
   private timeout: number;
 
   constructor(config: OpenLLMConfig = {}) {
-    this.baseUrl = `http://localhost:${config.engine ?? 8080}`;
+    if (typeof config.engine === "number") {
+      this.baseUrl = `http://localhost:${config.engine}`;
+    } else if (typeof config.engine === "string") {
+      this.baseUrl = config.engine;
+    } else {
+      this.baseUrl = "http://localhost:8080";
+    }
     this.timeout = config.timeout ?? 30000;
   }
 
