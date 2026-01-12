@@ -3,6 +3,7 @@ name = "openllm-server"
 version = "1.0.0"
 edition = "2024"
 description = "OpenLLM inference engine with HTTP API and streaming support"
+license = "MIT"
 
 [dependencies]
 axum = "0.7.5"
