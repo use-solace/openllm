@@ -6,7 +6,9 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use futures::stream::iter as stream_iter;
+use futures::stream::{Stream, StreamExt};
+use std::pin::Pin;
+use async_stream::stream;
 
 use super::super::{AppState, InferenceBackend};
 
@@ -306,7 +308,7 @@ async fn huggingface_inference(
 
 async fn openai_chat_completion(
     base_url: &str,
-    _model: &str,
+    model: &str,
     prompt: &str,
     max_tokens: u32,
     temperature: f32,
@@ -317,7 +319,7 @@ async fn openai_chat_completion(
         .map_err(|_| "OPENAI_API_KEY not set. Set OPENAI_API_KEY environment variable.")?;
 
     let request_body = OpenAIChatCompletionRequest {
-        model: "gpt-3.5-turbo".to_string(),
+        model: model.to_string(),
         messages: vec![ChatMessage {
             role: "user".to_string(),
             content: prompt.to_string(),
@@ -382,10 +384,10 @@ pub async fn inference_stream(
 
     drop(models);
 
-    let events: Vec<Result<Event, std::io::Error>> = match inference_backend {
-        InferenceBackend::Ollama => ollama_stream_events(&backend_url, &model_id, &prompt, req.max_tokens, temperature).await,
-        InferenceBackend::Llama => llama_cpp_stream_events(&backend_url, &model_id, &prompt, req.max_tokens, temperature).await,
-        InferenceBackend::OpenAI => openai_stream_events(&backend_url, &prompt, req.max_tokens, temperature).await,
+    let stream: Pin<Box<dyn Stream<Item = Result<Event, std::io::Error>> + Send>> = match inference_backend {
+        InferenceBackend::Ollama => Box::pin(ollama_stream_events(backend_url.clone(), model_id.clone(), prompt, req.max_tokens, temperature)),
+        InferenceBackend::Llama => Box::pin(llama_cpp_stream_events(backend_url.clone(), model_id.clone(), prompt, req.max_tokens, temperature)),
+        InferenceBackend::OpenAI => Box::pin(openai_stream_events(backend_url.clone(), model_id.clone(), prompt, req.max_tokens, temperature)),
         InferenceBackend::HuggingFace => {
             return Err((
                 StatusCode::NOT_IMPLEMENTED,
@@ -393,8 +395,6 @@ pub async fn inference_stream(
             ));
         }
     };
-
-    let stream = futures::stream::iter(events);
 
     let response = (
         [(header::CONTENT_TYPE, "text/event-stream"),
@@ -407,260 +407,278 @@ pub async fn inference_stream(
     Ok(response)
 }
 
-async fn ollama_stream_events(
-    base_url: &str,
-    model: &str,
-    prompt: &str,
+fn ollama_stream_events(
+    base_url: String,
+    model: String,
+    prompt: String,
     max_tokens: u32,
     temperature: f32,
-) -> Vec<Result<Event, std::io::Error>> {
-    let client = reqwest::Client::new();
+) -> impl Stream<Item = Result<Event, std::io::Error>> {
+    stream! {
+        let client = reqwest::Client::new();
 
-    let request_body = OllamaGenerateRequest {
-        model: model.to_string(),
-        prompt: prompt.to_string(),
-        stream: true,
-        options: OllamaOptions {
-            num_predict: max_tokens,
-            temperature,
-        },
-    };
+        let request_body = OllamaGenerateRequest {
+            model: model.clone(),
+            prompt: prompt.clone(),
+            stream: true,
+            options: OllamaOptions {
+                num_predict: max_tokens,
+                temperature,
+            },
+        };
 
-    let response = match client
-        .post(&format!("{}/api/generate", base_url))
-        .json(&request_body)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return vec![Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Ollama stream failed: {}", e)))];
+        let response = match client
+            .post(&format!("{}/api/generate", base_url))
+            .json(&request_body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                yield Err(std::io::Error::other(format!("Ollama stream failed: {}", e)));
+                return;
+            }
+        };
+
+        if !response.status().is_success() {
+            yield Err(std::io::Error::other(format!("Ollama API error: {}", response.status())));
+            return;
         }
-    };
 
-    if !response.status().is_success() {
-        return vec![Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Ollama API error: {}", response.status())))];
-    }
+        let mut byte_stream = response.bytes_stream();
+        let mut buffer = Vec::new();
+        let mut token_id = 0u32;
 
-    let full_response = match response.text().await {
-        Ok(t) => t,
-        Err(e) => {
-            return vec![Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Ollama read error: {}", e)))];
-        }
-    };
-
-    let mut events = Vec::new();
-    let mut token_id = 0u32;
-
-    for line in full_response.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Ok(ollama_resp) = serde_json::from_str::<OllamaGenerateResponse>(line) {
-            let stream_token = StreamToken {
-                token: ollama_resp.response.clone(),
-                token_id,
-                complete: ollama_resp.done,
-            };
-            token_id += 1;
-
-            match serde_json::to_string(&stream_token) {
-                Ok(json_data) => {
-                    events.push(Ok(Event::default()
-                        .event("token")
-                        .data(json_data)));
-                }
+        while let Some(chunk) = byte_stream.next().await {
+            let chunk = match chunk {
+                Ok(c) => c,
                 Err(e) => {
-                    events.push(Err(std::io::Error::new(std::io::ErrorKind::Other, format!("JSON error: {}", e))));
+                    yield Err(std::io::Error::other(format!("Ollama read error: {}", e)));
+                    return;
                 }
-            }
+            };
 
-            if ollama_resp.done {
-                break;
-            }
-        }
-    }
+            buffer.extend_from_slice(&chunk);
 
-    events
-}
+            while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
+                let line = String::from_utf8_lossy(&buffer[..pos]).to_string();
+                buffer.drain(..=pos);
 
-async fn llama_cpp_stream_events(
-    base_url: &str,
-    _model: &str,
-    prompt: &str,
-    max_tokens: u32,
-    temperature: f32,
-) -> Vec<Result<Event, std::io::Error>> {
-    let client = reqwest::Client::new();
+                if line.trim().is_empty() {
+                    continue;
+                }
 
-    let request_body = serde_json::json!({
-        "prompt": prompt,
-        "n_predict": max_tokens,
-        "temperature": temperature,
-        "stream": true
-    });
-
-    let response = match client
-        .post(&format!("{}/v1/completions", base_url))
-        .json(&request_body)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return vec![Err(std::io::Error::new(std::io::ErrorKind::Other, format!("llama.cpp stream failed: {}", e)))];
-        }
-    };
-
-    if !response.status().is_success() {
-        return vec![Err(std::io::Error::new(std::io::ErrorKind::Other, format!("llama.cpp API error: {}", response.status())))];
-    }
-
-    let full_response = match response.text().await {
-        Ok(t) => t,
-        Err(e) => {
-            return vec![Err(std::io::Error::new(std::io::ErrorKind::Other, format!("llama.cpp read error: {}", e)))];
-        }
-    };
-
-    let mut events = Vec::new();
-    let mut token_id = 0u32;
-
-    for line in full_response.lines() {
-        if line.trim().is_empty() || line.starts_with("data: ") == false {
-            continue;
-        }
-        let data = &line[6..];
-        if data == "[DONE]" {
-            break;
-        }
-        if let Ok(resp_json) = serde_json::from_str::<serde_json::Value>(data) {
-            if let Some(choices) = resp_json["choices"].as_array() {
-                if let Some(choice) = choices.first() {
-                    let text = choice["text"].as_str().unwrap_or("");
-                    let finish = choice["finish_reason"].is_null() == false;
-
+                if let Ok(ollama_resp) = serde_json::from_str::<OllamaGenerateResponse>(&line) {
                     let stream_token = StreamToken {
-                        token: text.to_string(),
+                        token: ollama_resp.response.clone(),
                         token_id,
-                        complete: finish,
+                        complete: ollama_resp.done,
                     };
                     token_id += 1;
 
-                    match serde_json::to_string(&stream_token) {
-                        Ok(json_data) => {
-                            events.push(Ok(Event::default()
-                                .event("token")
-                                .data(json_data)));
-                        }
-                        Err(e) => {
-                            events.push(Err(std::io::Error::new(std::io::ErrorKind::Other, format!("JSON error: {}", e))));
-                        }
+                    if let Ok(json_data) = serde_json::to_string(&stream_token) {
+                        yield Ok(Event::default().event("token").data(json_data));
                     }
 
-                    if finish {
-                        break;
+                    if ollama_resp.done {
+                        return;
                     }
                 }
             }
         }
     }
-
-    events
 }
 
-async fn openai_stream_events(
-    base_url: &str,
-    prompt: &str,
+fn llama_cpp_stream_events(
+    base_url: String,
+    _model: String,
+    prompt: String,
     max_tokens: u32,
     temperature: f32,
-) -> Vec<Result<Event, std::io::Error>> {
-    let client = reqwest::Client::new();
+) -> impl Stream<Item = Result<Event, std::io::Error>> {
+    stream! {
+        let client = reqwest::Client::new();
 
-    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+        let request_body = serde_json::json!({
+            "prompt": prompt,
+            "n_predict": max_tokens,
+            "temperature": temperature,
+            "stream": true
+        });
 
-    let request_body = OpenAIChatCompletionRequest {
-        model: "gpt-3.5-turbo".to_string(),
-        messages: vec![ChatMessage {
-            role: "user".to_string(),
-            content: prompt.to_string(),
-        }],
-        max_tokens,
-        temperature,
-        stream: true,
-    };
+        let response = match client
+            .post(&format!("{}/v1/completions", base_url))
+            .json(&request_body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                yield Err(std::io::Error::other(format!("llama.cpp stream failed: {}", e)));
+                return;
+            }
+        };
 
-    let response = match client
-        .post(&format!("{}/chat/completions", base_url))
-        .header("Authorization", format!("Bearer {}", api_key))
-        .json(&request_body)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return vec![Err(std::io::Error::new(std::io::ErrorKind::Other, format!("OpenAI stream failed: {}", e)))];
+        if !response.status().is_success() {
+            yield Err(std::io::Error::other(format!("llama.cpp API error: {}", response.status())));
+            return;
         }
-    };
 
-    if !response.status().is_success() {
-        return vec![Err(std::io::Error::new(std::io::ErrorKind::Other, format!("OpenAI API error: {}", response.status())))];
-    }
+        let mut byte_stream = response.bytes_stream();
+        let mut buffer = Vec::new();
+        let mut token_id = 0u32;
 
-    let full_response = match response.text().await {
-        Ok(t) => t,
-        Err(e) => {
-            return vec![Err(std::io::Error::new(std::io::ErrorKind::Other, format!("OpenAI read error: {}", e)))];
-        }
-    };
+        while let Some(chunk) = byte_stream.next().await {
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(e) => {
+                    yield Err(std::io::Error::other(format!("llama.cpp read error: {}", e)));
+                    return;
+                }
+            };
 
-    let mut events = Vec::new();
-    let mut token_id = 0u32;
+            buffer.extend_from_slice(&chunk);
 
-    for line in full_response.lines() {
-        if line.trim().is_empty() || line.starts_with("data: ") == false {
-            continue;
-        }
-        let data = &line[6..];
-        if data == "[DONE]" {
-            break;
-        }
-        if let Ok(resp_json) = serde_json::from_str::<serde_json::Value>(data) {
-            if let Some(choices) = resp_json["choices"].as_array() {
-                if let Some(choice) = choices.first() {
-                    let delta = &choice["delta"];
-                    let text = delta["content"].as_str().unwrap_or("");
-                    let finish = choice["finish_reason"].is_null() == false;
+            while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
+                let line = String::from_utf8_lossy(&buffer[..pos]).to_string();
+                buffer.drain(..=pos);
 
-                    if text.is_empty() && !finish {
-                        continue;
-                    }
+                if line.trim().is_empty() || !line.starts_with("data: ") {
+                    continue;
+                }
 
-                    let stream_token = StreamToken {
-                        token: text.to_string(),
-                        token_id,
-                        complete: finish,
-                    };
-                    token_id += 1;
+                let data = &line[6..];
+                if data == "[DONE]" {
+                    return;
+                }
 
-                    match serde_json::to_string(&stream_token) {
-                        Ok(json_data) => {
-                            events.push(Ok(Event::default()
-                                .event("token")
-                                .data(json_data)));
+                if let Ok(resp_json) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(choices) = resp_json["choices"].as_array() {
+                        if let Some(choice) = choices.first() {
+                            let text = choice["text"].as_str().unwrap_or("");
+                            let finish = choice["finish_reason"].is_null() == false;
+
+                            let stream_token = StreamToken {
+                                token: text.to_string(),
+                                token_id,
+                                complete: finish,
+                            };
+                            token_id += 1;
+
+                            if let Ok(json_data) = serde_json::to_string(&stream_token) {
+                                yield Ok(Event::default().event("token").data(json_data));
+                            }
+
+                            if finish {
+                                return;
+                            }
                         }
-                        Err(e) => {
-                            events.push(Err(std::io::Error::new(std::io::ErrorKind::Other, format!("JSON error: {}", e))));
-                        }
-                    }
-
-                    if finish {
-                        break;
                     }
                 }
             }
         }
     }
+}
 
-    events
+fn openai_stream_events(
+    base_url: String,
+    model: String,
+    prompt: String,
+    max_tokens: u32,
+    temperature: f32,
+) -> impl Stream<Item = Result<Event, std::io::Error>> {
+    stream! {
+        let client = reqwest::Client::new();
+
+        let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+
+        let request_body = OpenAIChatCompletionRequest {
+            model: model.clone(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: prompt.clone(),
+            }],
+            max_tokens,
+            temperature,
+            stream: true,
+        };
+
+        let response = match client
+            .post(&format!("{}/chat/completions", base_url))
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&request_body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                yield Err(std::io::Error::other(format!("OpenAI stream failed: {}", e)));
+                return;
+            }
+        };
+
+        if !response.status().is_success() {
+            yield Err(std::io::Error::other(format!("OpenAI API error: {}", response.status())));
+            return;
+        }
+
+        let mut byte_stream = response.bytes_stream();
+        let mut buffer = Vec::new();
+        let mut token_id = 0u32;
+
+        while let Some(chunk) = byte_stream.next().await {
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(e) => {
+                    yield Err(std::io::Error::other(format!("OpenAI read error: {}", e)));
+                    return;
+                }
+            };
+
+            buffer.extend_from_slice(&chunk);
+
+            while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
+                let line = String::from_utf8_lossy(&buffer[..pos]).to_string();
+                buffer.drain(..=pos);
+
+                if line.trim().is_empty() || !line.starts_with("data: ") {
+                    continue;
+                }
+
+                let data = &line[6..];
+                if data == "[DONE]" {
+                    return;
+                }
+
+                if let Ok(resp_json) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(choices) = resp_json["choices"].as_array() {
+                        if let Some(choice) = choices.first() {
+                            let delta = &choice["delta"];
+                            let text = delta["content"].as_str().unwrap_or("");
+                            let finish = choice["finish_reason"].is_null() == false;
+
+                            if text.is_empty() && !finish {
+                                continue;
+                            }
+
+                            let stream_token = StreamToken {
+                                token: text.to_string(),
+                                token_id,
+                                complete: finish,
+                            };
+                            token_id += 1;
+
+                            if let Ok(json_data) = serde_json::to_string(&stream_token) {
+                                yield Ok(Event::default().event("token").data(json_data));
+                            }
+
+                            if finish {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
