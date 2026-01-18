@@ -22,7 +22,7 @@
   "author": "Solace Contributors",
   "license": "MIT",
   "peerDependencies": {
-    "elysia": "^1.0.0"
+    "elysia": "^1.4.22"
   },
   "peerDependenciesMeta": {
     "elysia": {
@@ -30,12 +30,12 @@
     }
   },
   "dependencies": {
-    "@elysiajs/bearer": "^1.0.0"
+    "@elysiajs/bearer": "^1.4.17"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "typescript": "^5.0.0",
-    "elysia": "^1.0.0"
+    "elysia": "^1.4.22"
   },
   "publishConfig": {
     "access": "public"
